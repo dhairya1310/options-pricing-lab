@@ -277,8 +277,10 @@ def sanity_check(params: pd.DataFrame, grid: pd.DataFrame, ticker: str) -> dict:
         log.warning("%s %s (%.0f days): %s, rmse %.2f vol pts",
                     ticker, row.expiry.date(), row.days, row.status, row.rmse_vol_pts)
     cal = calendar_violations(grid)
+    breaks_file = PROCESSED_DIR / f"{ticker}_calendar_breaks.csv"
+    breaks_file.unlink(missing_ok=True)  # clear out any file left by an earlier run
     if len(cal):
-        cal.to_csv(PROCESSED_DIR / f"{ticker}_calendar_breaks.csv", index=False)
+        cal.to_csv(breaks_file, index=False)
         pairs = cal.groupby(["prev_expiry", "expiry"]).size()
         for (short_exp, long_exp), n in pairs.items():
             log.warning("%s: %d grid points where %s carries more total variance than the later %s",
