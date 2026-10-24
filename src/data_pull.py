@@ -4,6 +4,7 @@ Step 1: pull option chains from Yahoo Finance and save each pull as a Parquet sn
 Run from the project root:
     python -m src.data_pull
     python -m src.data_pull --tickers SPY AAPL
+    python -m src.data_pull --strict --skip-if-closed   (what the daily GitHub job runs)
 
 Every snapshot goes to data/raw/<TICKER>_<UTC timestamp>.parquet so we can
 rebuild any past surface later. Nothing gets saved if a hard sanity check fails.
@@ -11,9 +12,11 @@ rebuild any past surface later. Nothing gets saved if a hard sanity check fails.
 
 import argparse
 import logging
+import sys
 import warnings
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import yfinance as yf
@@ -159,12 +162,35 @@ def save_snapshot(df: pd.DataFrame, ticker: str) -> Path:
     return path
 
 
+def market_traded_today() -> bool:
+    """
+    True if US stocks traded today (New York time). We ask Yahoo for SPY's
+    recent daily bars: on a weekend or exchange holiday today has no bar.
+    The scheduled job uses this so it never saves a duplicate snapshot of
+    the previous session.
+    """
+    hist = yf.Ticker("SPY").history(period="5d")
+    if hist.empty:
+        raise ValueError("no SPY history came back, cannot tell if the market was open")
+    last_bar = hist.index[-1].tz_convert("America/New_York").date()
+    today = datetime.now(ZoneInfo("America/New_York")).date()
+    return last_bar == today
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--tickers", nargs="+", default=TICKERS)
+    parser.add_argument("--strict", action="store_true",
+                        help="exit with an error if any ticker fails, so the scheduled job shows red")
+    parser.add_argument("--skip-if-closed", action="store_true",
+                        help="do nothing if the market did not trade today")
     args = parser.parse_args()
 
     setup_logging()
+    if args.skip_if_closed and not market_traded_today():
+        log.info("The market did not trade today (weekend or holiday). Nothing to pull.")
+        return
+
     summary = []
     for ticker in args.tickers:
         try:
@@ -186,6 +212,11 @@ def main() -> None:
 
     print("\n=== Pull summary ===")
     print(pd.DataFrame(summary).to_string(index=False))
+
+    failed = [s["ticker"] for s in summary if str(s["file"]).startswith("FAILED")]
+    if failed and args.strict:
+        log.error("Failed tickers: %s", ", ".join(failed))
+        sys.exit(1)
 
 
 if __name__ == "__main__":

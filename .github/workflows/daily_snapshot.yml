@@ -1,0 +1,64 @@
+# Pulls fresh option chains every weekday after the US close and commits the
+# snapshot back to the repo. After a few weeks of these we can watch the vol
+# surface move around earnings.
+#
+# Timing: GitHub schedules run on UTC. 21:30 UTC is 5:30 PM New York time in
+# summer and 4:30 PM in winter, so it always lands after the 4 PM close
+# (and after SPY options stop at 4:15 PM). GitHub can start scheduled jobs
+# up to an hour late on busy days, which is fine here.
+
+name: Daily option chain snapshot
+
+on:
+  schedule:
+    - cron: "30 21 * * 1-5"   # Monday to Friday
+  workflow_dispatch:           # adds a "Run workflow" button for manual runs
+
+# The job pushes the new snapshot back to the repo, so it needs write access
+permissions:
+  contents: write
+
+# Never let two runs overlap and fight over the same commit
+concurrency:
+  group: daily-snapshot
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # If someone broke the pricers, stop here instead of saving data
+      - name: Run the pricing tests
+        run: python -m pytest -q
+
+      # --skip-if-closed: weekends are already excluded above, this catches
+      #   exchange holidays so we never save a copy of the previous session
+      # --strict: any ticker failing turns the run red and GitHub emails you
+      - name: Pull the option chains
+        run: python -m src.data_pull --strict --skip-if-closed
+
+      - name: Commit the new snapshot
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/raw
+          if git diff --cached --quiet; then
+            echo "No new snapshot today, nothing to commit."
+            exit 0
+          fi
+          git commit -m "Daily snapshot $(date -u +%Y-%m-%d)"
+          git push
