@@ -21,6 +21,10 @@ FIGURES = REPORTS / "figures"
 
 TICKERS = ["SPY", "AAPL", "NVDA", "TSLA", "JPM"]
 
+# The daily job commits fresh results every evening. Cached data expires after
+# an hour, so the live app picks up a new snapshot without a manual restart.
+CACHE_SECONDS = 3600
+
 
 def _latest(pattern: str) -> Path:
     files = sorted(PROCESSED.glob(pattern))
@@ -30,13 +34,13 @@ def _latest(pattern: str) -> Path:
     return files[-1]
 
 
-@st.cache_data
+@st.cache_data(ttl=CACHE_SECONDS)
 def load_chain(ticker: str) -> pd.DataFrame:
     """Every clean contract with its implied vol, forward and carry."""
     return pd.read_parquet(_latest(f"{ticker}_*_iv.parquet"))
 
 
-@st.cache_data
+@st.cache_data(ttl=CACHE_SECONDS)
 def load_svi(ticker: str) -> pd.DataFrame:
     """SVI parameters per expiry, only the ones that fit cleanly."""
     p = pd.read_csv(PROCESSED / f"{ticker}_svi_params.csv", parse_dates=["expiry"])
@@ -45,17 +49,17 @@ def load_svi(ticker: str) -> pd.DataFrame:
     return p.sort_values("T").reset_index(drop=True)
 
 
-@st.cache_data
+@st.cache_data(ttl=CACHE_SECONDS)
 def load_surface(ticker: str) -> pd.DataFrame:
     return pd.read_parquet(PROCESSED / f"{ticker}_surface.parquet")
 
 
-@st.cache_data
+@st.cache_data(ttl=CACHE_SECONDS)
 def load_model_vs_market() -> pd.DataFrame:
     return pd.read_parquet(PROCESSED / "model_vs_market.parquet")
 
 
-@st.cache_data
+@st.cache_data(ttl=CACHE_SECONDS)
 def load_parity() -> pd.DataFrame:
     return pd.read_parquet(PROCESSED / "parity_pairs.parquet")
 

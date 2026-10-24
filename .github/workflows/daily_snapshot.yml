@@ -1,11 +1,13 @@
-# Pulls fresh option chains every weekday after the US close and commits the
-# snapshot back to the repo. After a few weeks of these we can watch the vol
-# surface move around earnings.
+# Every weekday after the US close: pull fresh option chains, rerun the whole
+# pipeline, and commit the results. The live Streamlit app reads those files,
+# so it shows the latest close by the next morning with nobody touching it.
 #
 # Timing: GitHub schedules run on UTC. 21:30 UTC is 5:30 PM New York time in
 # summer and 4:30 PM in winter, so it always lands after the 4 PM close
 # (and after SPY options stop at 4:15 PM). GitHub can start scheduled jobs
 # up to an hour late on busy days, which is fine here.
+#
+# Needs one repository secret: FRED_API_KEY (Settings > Secrets and variables > Actions).
 
 name: Daily option chain snapshot
 
@@ -14,7 +16,7 @@ on:
     - cron: "30 21 * * 1-5"   # Monday to Friday
   workflow_dispatch:           # adds a "Run workflow" button for manual runs
 
-# The job pushes the new snapshot back to the repo, so it needs write access
+# The job pushes the new results back to the repo, so it needs write access
 permissions:
   contents: write
 
@@ -26,7 +28,7 @@ concurrency:
 jobs:
   snapshot:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
 
     steps:
       - name: Check out the repo
@@ -51,13 +53,42 @@ jobs:
       - name: Pull the option chains
         run: python -m src.data_pull --strict --skip-if-closed
 
-      - name: Commit the new snapshot
+      # Only run the pipeline when a new snapshot actually arrived
+      - name: Check for a new snapshot
+        id: fresh
+        run: |
+          if [ -n "$(git status --porcelain data/raw)" ]; then
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No new snapshot, the market was closed."
+            echo "new=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Every step has its own sanity checks. If any of them fails, the job
+      # stops here, nothing is committed, and the app keeps the last good data.
+      - name: Run the pipeline
+        if: steps.fresh.outputs.new == 'true'
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: |
+          python -m src.clean
+          python -m src.inputs
+          python -m src.implied_vol
+          python -m src.surface
+          python -m src.model_vs_market
+          python -m src.parity
+          python -m src.convergence
+          python -m src.memo_stats
+          python -m src.prune
+
+      - name: Commit the results
+        if: steps.fresh.outputs.new == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/raw
+          git add -A data reports
           if git diff --cached --quiet; then
-            echo "No new snapshot today, nothing to commit."
+            echo "Nothing changed, nothing to commit."
             exit 0
           fi
           git commit -m "Daily snapshot $(date -u +%Y-%m-%d)"
