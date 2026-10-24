@@ -268,7 +268,24 @@ def sanity_check(params: pd.DataFrame, grid: pd.DataFrame, ticker: str) -> dict:
     # Hard checks
     assert len(ok) >= 3, f"{ticker}: only {len(ok)} expiries fit cleanly, not enough for a surface"
     assert np.isfinite(grid["iv"]).all(), f"{ticker}: surface has missing values"
-    assert grid["iv"].between(0.01, 3.0).all(), f"{ticker}: surface vol outside 1% to 300%"
+
+    # The range check covers only points backed by real quotes. A 3 day option
+    # is quoted a few percent around spot. Carried out to a 70% strike, even a
+    # curve inside Lee's bound can reach several hundred percent vol, because
+    # total variance spread over 3 days of time is a huge annualised number.
+    # Those points are flagged extrapolated and hidden from every chart.
+    quoted = grid[~grid["extrapolated"]]
+    bad = quoted[~quoted["iv"].between(0.01, 3.0)]
+    if len(bad):
+        log.error("%s: quoted surface points outside 1%% to 300%%:\n%s", ticker,
+                  bad.groupby("expiry").agg(days=("days", "first"), points=("iv", "size"),
+                                            lowest=("iv", "min"), highest=("iv", "max")).to_string())
+    assert bad.empty, f"{ticker}: quoted surface vol outside 1% to 300%"
+
+    wild = grid[grid["extrapolated"] & ~grid["iv"].between(0.01, 3.0)]
+    if len(wild):
+        log.info("%s: %d extrapolated grid points beyond 300%% vol (hidden), on expiries of %s days",
+                 ticker, len(wild), ", ".join(f"{d:.0f}" for d in sorted(wild["days"].unique())))
     assert (ok["b"] >= 0).all() and ok["rho"].between(-1, 1).all(), f"{ticker}: SVI parameters out of bounds"
 
     # Soft checks

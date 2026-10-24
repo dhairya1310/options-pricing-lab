@@ -31,7 +31,7 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import brentq
 
-from src.pricing import bs_price
+from src.pricing import binomial_price, bs_price
 
 TICKERS = ["SPY", "AAPL", "NVDA", "TSLA", "JPM"]
 PROCESSED_DIR = Path("data/processed")
@@ -41,6 +41,7 @@ PRICE_TOLERANCE = 1e-6           # how closely the solved IV must reprice the mi
 MIN_PRICE_PER_VOL_POINT = 0.001  # below this the price carries no real vol information
 PARITY_STRIKES = 6               # strikes nearest spot used to imply the forward
 PARITY_MIN_PAIRS = 2             # below this an expiry keeps the trailing dividend
+EEP_STEPS = 200                  # tree steps for early exercise estimates (American minus European on the same grid)
 
 log = logging.getLogger("implied_vol")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -113,11 +114,19 @@ def add_implied_carry(df: pd.DataFrame) -> pd.DataFrame:
     From the forward we back out an implied carry per expiry and store it in q,
     so every later step (IV, Greeks, surface) uses the market's forward.
     The original trailing yield is kept as q_trailing.
+
+    One catch: parity is exact only for European options. Near the money,
+    American puts carry some early exercise value, more so on long expiries,
+    and that drags C - P down. Read naively, the forward comes out too low
+    (Step 10 testing measured up to 0.5% low at 15 months). So before using
+    parity we strip each option's early exercise value, estimated with the
+    tree, and repeat twice so the vol and the forward settle together.
     """
     df = df.copy()
     df["q_trailing"] = df["q"]
     df["forward_source"] = "trailing dividend"
     df["forward"] = df["spot"] * np.exp((df["r"] - df["q"]) * df["T"])
+    df["forward_eep_adj_pct"] = 0.0
 
     for expiry, one in df.groupby("expiry"):
         calls = one[one["option_type"] == "call"].set_index("strike")["mid"]
@@ -128,13 +137,34 @@ def add_implied_carry(df: pd.DataFrame) -> pd.DataFrame:
         spot, T, r = one["spot"].iloc[0], one["T"].iloc[0], one["r"].iloc[0]
 
         nearest = pairs.loc[(pairs.index.to_series() - spot).abs().nsmallest(PARITY_STRIKES).index]
-        forwards = nearest.index.values + np.exp(r * T) * (nearest["call"] - nearest["put"]).values
-        forward = float(np.median(forwards))
+        strikes = nearest.index.values
+        growth = np.exp(r * T)
+        naive = float(np.median(strikes + growth * (nearest["call"] - nearest["put"]).values))
+
+        forward = naive
+        for _ in range(2):
+            carry = r - np.log(forward / spot) / T
+            estimates = []
+            for K, row in nearest.iterrows():
+                # Vol from the out of the money side, which has the least early exercise in it
+                kind, price = ("call", row["call"]) if K >= forward else ("put", row["put"])
+                vol, status = implied_vol(price, spot, K, T, r, carry, kind)
+                if status != "ok":
+                    continue
+                eep_call = (binomial_price(spot, K, T, r, carry, vol, "call", steps=EEP_STEPS, american=True)
+                            - binomial_price(spot, K, T, r, carry, vol, "call", steps=EEP_STEPS, american=False))
+                eep_put = (binomial_price(spot, K, T, r, carry, vol, "put", steps=EEP_STEPS, american=True)
+                           - binomial_price(spot, K, T, r, carry, vol, "put", steps=EEP_STEPS, american=False))
+                euro_gap = (row["call"] - eep_call) - (row["put"] - eep_put)
+                estimates.append(K + growth * euro_gap)
+            if estimates:
+                forward = float(np.median(estimates))
 
         rows = df["expiry"] == expiry
         df.loc[rows, "forward"] = forward
         df.loc[rows, "q"] = r - np.log(forward / spot) / T
         df.loc[rows, "forward_source"] = "put-call parity"
+        df.loc[rows, "forward_eep_adj_pct"] = (forward / naive - 1) * 100
     return df
 
 
@@ -190,27 +220,53 @@ def sanity_check(df: pd.DataFrame, ticker: str) -> dict:
     own_forward = per_expiry["spot"] * np.exp((per_expiry["r"] - per_expiry["q_trailing"]) * per_expiry["T"])
     forward_gap = ((per_expiry["forward"] / own_forward - 1).abs() * 100)
     if (forward_gap > 2).any():
-        log.warning("%s: %d expiries have a parity forward over 2%% from our own",
-                    ticker, int((forward_gap > 2).sum()))
+        far = per_expiry[forward_gap > 2]
+        detail = ", ".join(f"{d:.0f}d {g:+.2f}%" for d, g in
+                           zip(far["days_to_expiry"], (far["forward"] / own_forward[far.index] - 1) * 100))
+        log.warning("%s: parity forward over 2%% from our own on: %s", ticker, detail)
 
-    # The test that matters: at the strike nearest the forward, the call and the
-    # put should now imply nearly the same vol. This gap is what showed up as a
-    # jump in the smile before we used the parity forward.
-    gaps = []
+    # Call vs put vol at the strike nearest the forward, two ways.
+    #
+    # raw:  plain BS vols on the market mids. Biased as a test of the forward:
+    #       American puts near the money carry early exercise value, so with
+    #       the right forward the put still looks a little richer. A forward
+    #       that is too low hides this by soaking up the premium.
+    # euro: strip each side's early exercise value (tree, American minus
+    #       European) first, then compare. With the right forward this one
+    #       should sit near zero. This is the fair test.
+    raw_gaps, euro_gaps = [], []
     for _, one in solved.groupby("expiry"):
-        both = one.pivot_table(index="strike", columns="option_type", values="iv").dropna()
+        both = one.pivot_table(index="strike", columns="option_type", values=["iv", "mid"]).dropna()
         if both.empty:
             continue
-        k_atm = (both.index.to_series() - one["forward"].iloc[0]).abs().idxmin()
-        gaps.append(abs(both.loc[k_atm, "call"] - both.loc[k_atm, "put"]) * 100)
-    atm_gap = float(np.median(gaps)) if gaps else np.nan
-    if atm_gap > 1.0:
-        log.warning("%s: calls and puts still disagree by %.2f vol pts at the money", ticker, atm_gap)
+        fwd = one["forward"].iloc[0]
+        k = (both.index.to_series() - fwd).abs().idxmin()
+        iv_c, iv_p = both.loc[k, ("iv", "call")], both.loc[k, ("iv", "put")]
+        raw_gaps.append(abs(iv_c - iv_p) * 100)
+
+        S, T, r, q = one["spot"].iloc[0], one["T"].iloc[0], one["r"].iloc[0], one["q"].iloc[0]
+        vol = (iv_c + iv_p) / 2
+        stripped = {}
+        for kind in ("call", "put"):
+            eep = (binomial_price(S, k, T, r, q, vol, kind, steps=EEP_STEPS, american=True)
+                   - binomial_price(S, k, T, r, q, vol, kind, steps=EEP_STEPS, american=False))
+            stripped[kind], status = implied_vol(both.loc[k, ("mid", kind)] - eep, S, k, T, r, q, kind)
+            if status != "ok":
+                stripped[kind] = np.nan
+        if np.isfinite(stripped["call"]) and np.isfinite(stripped["put"]):
+            euro_gaps.append(abs(stripped["call"] - stripped["put"]) * 100)
+
+    atm_gap = float(np.median(raw_gaps)) if raw_gaps else np.nan
+    euro_gap = float(np.median(euro_gaps)) if euro_gaps else np.nan
+    if euro_gap > 1.0:
+        log.warning("%s: after removing early exercise, calls and puts still disagree by %.2f vol pts "
+                    "at the money, the forward may be off", ticker, euro_gap)
 
     log.info("%s: sanity checks passed, worst repricing error %.1e", ticker, worst)
     return {"otm_solved_pct": round(otm_rate * 100, 1),
             "atm_30d_iv_pct": round(atm * 100, 1),
             "atm_call_put_gap_pts": round(atm_gap, 2),
+            "atm_gap_ex_early_pts": round(euro_gap, 2),
             "parity_fwd_pct": round((per_expiry["forward_source"] == "put-call parity").mean() * 100, 0),
             "max_fwd_shift_pct": round(forward_gap.max(), 2),
             "median_gap_to_yahoo_pts": round(yahoo_gap * 100, 2)}
