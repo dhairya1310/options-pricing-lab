@@ -39,6 +39,8 @@ PROCESSED_DIR = Path("data/processed")
 VOL_LOW, VOL_HIGH = 0.001, 5.0   # search between 0.1% and 500% vol
 PRICE_TOLERANCE = 1e-6           # how closely the solved IV must reprice the mid
 MIN_PRICE_PER_VOL_POINT = 0.001  # below this the price carries no real vol information
+PARITY_STRIKES = 6               # strikes nearest spot used to imply the forward
+PARITY_MIN_PAIRS = 2             # below this an expiry keeps the trailing dividend
 
 log = logging.getLogger("implied_vol")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -77,7 +79,7 @@ def implied_vol(price, S, K, T, r, q, kind):
 
 
 def solve_chain(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
+    df = add_implied_carry(df)
     results = [
         implied_vol(row.mid, row.spot, row.strike, row.T, row.r, row.q, row.option_type)
         for row in df.itertuples()
@@ -85,10 +87,54 @@ def solve_chain(df: pd.DataFrame) -> pd.DataFrame:
     df["iv"] = [r[0] for r in results]
     df["iv_status"] = [r[1] for r in results]
 
-    # Out of the money: calls above spot, puts below. These carry almost no
-    # early exercise value, so their BS implied vol is the trustworthy one.
-    df["otm"] = ((df["option_type"] == "call") & (df["strike"] >= df["spot"])) | \
-                ((df["option_type"] == "put") & (df["strike"] < df["spot"]))
+    # Out of the money relative to the forward, the price the market expects
+    # the stock to trade at on expiry. These carry almost no early exercise
+    # value, so their BS implied vol is the trustworthy one.
+    df["otm"] = ((df["option_type"] == "call") & (df["strike"] >= df["forward"])) | \
+                ((df["option_type"] == "put") & (df["strike"] < df["forward"]))
+    return df
+
+
+def add_implied_carry(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Read the forward price from the market instead of computing it.
+
+    Put-call parity says C - P = e^(-rT) * (F - K), so every strike that has
+    both a call and a put gives us F = K + e^(rT) * (C - P). We take the median
+    over the strikes nearest the money, where quotes are tightest and early
+    exercise matters least.
+
+    Why bother: our own forward (spot, rate, trailing dividend) missed in two
+    ways. SPY options keep trading until 4:15 PM while our spot is the 4 PM
+    close, and a trailing dividend yield is not what the market expects over
+    each expiry. Either error shows up as calls and puts implying different
+    vols at the same strike, a visible jump in the smile right at the money.
+
+    From the forward we back out an implied carry per expiry and store it in q,
+    so every later step (IV, Greeks, surface) uses the market's forward.
+    The original trailing yield is kept as q_trailing.
+    """
+    df = df.copy()
+    df["q_trailing"] = df["q"]
+    df["forward_source"] = "trailing dividend"
+    df["forward"] = df["spot"] * np.exp((df["r"] - df["q"]) * df["T"])
+
+    for expiry, one in df.groupby("expiry"):
+        calls = one[one["option_type"] == "call"].set_index("strike")["mid"]
+        puts = one[one["option_type"] == "put"].set_index("strike")["mid"]
+        pairs = pd.DataFrame({"call": calls, "put": puts}).dropna()
+        if len(pairs) < PARITY_MIN_PAIRS:
+            continue
+        spot, T, r = one["spot"].iloc[0], one["T"].iloc[0], one["r"].iloc[0]
+
+        nearest = pairs.loc[(pairs.index.to_series() - spot).abs().nsmallest(PARITY_STRIKES).index]
+        forwards = nearest.index.values + np.exp(r * T) * (nearest["call"] - nearest["put"]).values
+        forward = float(np.median(forwards))
+
+        rows = df["expiry"] == expiry
+        df.loc[rows, "forward"] = forward
+        df.loc[rows, "q"] = r - np.log(forward / spot) / T
+        df.loc[rows, "forward_source"] = "put-call parity"
     return df
 
 
@@ -99,7 +145,7 @@ def atm_vol(df: pd.DataFrame, target_days: float = 30) -> float:
         return np.nan
     expiry = good.loc[(good["days_to_expiry"] - target_days).abs().idxmin(), "expiry"]
     one = good[good["expiry"] == expiry].copy()
-    one["dist"] = (one["strike"] - one["spot"]).abs()
+    one["dist"] = (one["strike"] - one["forward"]).abs()
     return one.nsmallest(2, "dist")["iv"].mean()
 
 
@@ -138,9 +184,35 @@ def sanity_check(df: pd.DataFrame, ticker: str) -> dict:
     if not 0.05 < atm < 1.5:
         log.warning("%s: 30 day ATM vol of %.1f%% looks unusual", ticker, atm * 100)
 
+    # The parity forward should sit close to the forward we computed ourselves.
+    # A big gap would mean a bad quote dragged the median, not a real carry.
+    per_expiry = df.drop_duplicates("expiry")
+    own_forward = per_expiry["spot"] * np.exp((per_expiry["r"] - per_expiry["q_trailing"]) * per_expiry["T"])
+    forward_gap = ((per_expiry["forward"] / own_forward - 1).abs() * 100)
+    if (forward_gap > 2).any():
+        log.warning("%s: %d expiries have a parity forward over 2%% from our own",
+                    ticker, int((forward_gap > 2).sum()))
+
+    # The test that matters: at the strike nearest the forward, the call and the
+    # put should now imply nearly the same vol. This gap is what showed up as a
+    # jump in the smile before we used the parity forward.
+    gaps = []
+    for _, one in solved.groupby("expiry"):
+        both = one.pivot_table(index="strike", columns="option_type", values="iv").dropna()
+        if both.empty:
+            continue
+        k_atm = (both.index.to_series() - one["forward"].iloc[0]).abs().idxmin()
+        gaps.append(abs(both.loc[k_atm, "call"] - both.loc[k_atm, "put"]) * 100)
+    atm_gap = float(np.median(gaps)) if gaps else np.nan
+    if atm_gap > 1.0:
+        log.warning("%s: calls and puts still disagree by %.2f vol pts at the money", ticker, atm_gap)
+
     log.info("%s: sanity checks passed, worst repricing error %.1e", ticker, worst)
     return {"otm_solved_pct": round(otm_rate * 100, 1),
             "atm_30d_iv_pct": round(atm * 100, 1),
+            "atm_call_put_gap_pts": round(atm_gap, 2),
+            "parity_fwd_pct": round((per_expiry["forward_source"] == "put-call parity").mean() * 100, 0),
+            "max_fwd_shift_pct": round(forward_gap.max(), 2),
             "median_gap_to_yahoo_pts": round(yahoo_gap * 100, 2)}
 
 

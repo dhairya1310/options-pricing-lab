@@ -79,10 +79,20 @@ def sanity_check(df: pd.DataFrame, ticker: str) -> dict:
     puts = df[df["option_type"] == "put"]
     tol = 1e-9
 
+    # Delta's ceiling is e^(-qT), not 1. Since Step 6, q holds the carry implied
+    # by put-call parity, which can dip below zero (no dividend plus a little
+    # borrow cost or timing noise). Then e^(-qT) sits just above 1 and a deep
+    # ITM call can carry a delta of 1.001. That is correct maths, not a bug.
+    ceiling = np.maximum(1.0, np.exp(-df["q"] * df["T"]))
+    call_cap = ceiling[calls.index]
+    put_cap = ceiling[puts.index]
+
     # Signs and ranges every option must respect, for both models
     for m in ("bs", "tree"):
-        assert calls[f"{m}_delta"].between(-tol, 1 + tol).all(), f"{ticker}: {m} call delta outside 0 to 1"
-        assert puts[f"{m}_delta"].between(-1 - tol, tol).all(), f"{ticker}: {m} put delta outside -1 to 0"
+        assert (calls[f"{m}_delta"] >= -tol).all() and (calls[f"{m}_delta"] <= call_cap + tol).all(), \
+            f"{ticker}: {m} call delta outside 0 to e^(-qT)"
+        assert (puts[f"{m}_delta"] <= tol).all() and (puts[f"{m}_delta"] >= -put_cap - tol).all(), \
+            f"{ticker}: {m} put delta outside -e^(-qT) to 0"
         assert (df[f"{m}_vega"] >= -tol).all(), f"{ticker}: {m} vega negative"
         assert (calls[f"{m}_rho"] >= -tol).all(), f"{ticker}: {m} call rho negative"
         assert (puts[f"{m}_rho"] <= tol).all(), f"{ticker}: {m} put rho positive"
@@ -117,7 +127,9 @@ def sanity_check(df: pd.DataFrame, ticker: str) -> dict:
 
     log.info("%s: sanity checks passed", ticker)
     return {"otm_delta_gap": round(delta_gap, 4), "otm_vega_gap_pct": round(vega_gap * 100, 2),
-            "itm_put_delta_gap": round(put_delta_gap, 4)}
+            "itm_put_delta_gap": round(put_delta_gap, 4),
+            "max_call_delta": round(calls["bs_delta"].max(), 4),
+            "carry_min_pct": round(df["q"].min() * 100, 2), "carry_max_pct": round(df["q"].max() * 100, 2)}
 
 
 def main() -> None:
