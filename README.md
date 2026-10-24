@@ -4,6 +4,10 @@ Three option pricing models built from scratch, tested against 8,568 live market
 
 **Live app: [options-pricing-lab.streamlit.app](https://options-pricing-lab.streamlit.app)** · **Desk memo: [docs/desk_memo.md](docs/desk_memo.md)**
 
+![Overview page of the live app: headline numbers, market snapshot and vol level against skew](docs/overview.png)
+
+![SPY implied volatility surface fitted with SVI](docs/surface.png)
+
 ## The question
 
 How well do textbook option models price real US equity options, and where exactly do they break?
