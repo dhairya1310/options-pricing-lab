@@ -1,0 +1,16 @@
+# Python clutter
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Secrets. The FRED key lives here and should never reach GitHub.
+.env
+
+# Run logs are for local debugging only
+logs/
+
+# Editor and OS files
+.vscode/
+.DS_Store
+Thumbs.db
