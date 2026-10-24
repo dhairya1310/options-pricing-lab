@@ -49,6 +49,8 @@ FIG_DIR = REPORT_DIR / "figures"
 ARB_MIN_PROFIT = 0.01  # a true arbitrage has to clear at least a cent per share
 EEP_STEPS = 200        # tree steps for early exercise estimates
 SHORT_DAYS = 30        # expiries shorter than this set the implied spot
+RATE_MIN_DAYS = 90     # under this, rates move C - P by too little to measure
+RATE_MIN_PAIRS = 6     # fewer pairs than this and a fitted line means little
 
 log = logging.getLogger("parity")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -99,6 +101,55 @@ def implied_spot(p: pd.DataFrame) -> float:
     return float(spots.median())
 
 
+def implied_funding(p: pd.DataFrame) -> pd.DataFrame:
+    """
+    Parity says European C - P = D * (F - K), a straight line in the strike.
+    Its slope is minus the discount factor D, the rate the options market
+    actually funds at. Desks call this the box spread rate.
+
+    Testing on real data showed why this matters: on 2 year SPY expiries the
+    early exercise free gap grew in a straight line with distance from the
+    forward, -5.85 at a 460 strike, -3.40 at 600. That is exactly what a
+    funding rate above the T-bill looks like. So for each expiry over 90 days
+    we fit the line (weighted by 1 / spread, after dropping outliers) and read
+    off the implied rate. What is left after the line is genuine mispricing.
+
+    Short expiries are skipped: over a few weeks a rate gap of 1% moves C - P
+    by cents, so the slope would be mostly noise.
+    """
+    p = p.copy()
+    p["rate_implied"] = np.nan
+    p["residual_ex_rate"] = p["residual_ex_early"]
+    y_all = (p["mid_c"] - p["eep_c"]) - (p["mid_p"] - p["eep_p"])
+    for expiry, idx in p.groupby("expiry").groups.items():
+        one = p.loc[idx]
+        T = one["T"].iloc[0]
+        if one["days_to_expiry"].iloc[0] < RATE_MIN_DAYS or len(one) < RATE_MIN_PAIRS:
+            continue
+        K, y, w = one["strike"].values, y_all[idx].values, 1 / one["cost"].clip(lower=0.01).values
+        # Fit only below the forward. Above it, in the money puts carry early
+        # exercise value that we estimated at the T-bill rate, so it is
+        # understated when funding is higher, and that bends the line. Testing
+        # with a known 80 bp gap recovered only 36 to 54 bp until this changed.
+        fit_zone = K <= one["forward"].values * 1.02
+        if fit_zone.sum() < RATE_MIN_PAIRS:
+            continue
+        keep = fit_zone.copy()
+        for _ in range(2):  # fit, drop anything over 3 robust standard deviations, refit
+            slope, intercept = np.polyfit(K[keep], y[keep], 1, w=w[keep])
+            resid = y - (intercept + slope * K)
+            mad = np.median(np.abs(resid[keep] - np.median(resid[keep]))) * 1.4826
+            keep = fit_zone & (np.abs(resid) <= max(3 * mad, 0.01))
+        D = -slope
+        rate = -np.log(D) / T if D > 0 else np.nan
+        if not (0 <= rate <= 0.12):
+            log.info("implied rate %.2f%% on %s is implausible, expiry left as is", rate * 100, expiry.date())
+            continue
+        p.loc[idx, "rate_implied"] = rate
+        p.loc[idx, "residual_ex_rate"] = resid
+    return p
+
+
 def measure(p: pd.DataFrame) -> pd.DataFrame:
     p = p.copy()
     p["spot_implied"] = implied_spot(p)
@@ -132,8 +183,11 @@ def measure(p: pd.DataFrame) -> pd.DataFrame:
     p["beats_cost_mkt_fwd"] = p["residual_gap"].abs() > p["cost"]
     # Level 4: and once early exercise is taken out as well?
     p["beats_cost_ex_early"] = p["residual_ex_early"].abs() > p["cost"]
+    # Level 5: and once the market's own funding rate is used on long expiries?
+    p = implied_funding(p)
+    p["beats_cost_ex_rate"] = p["residual_ex_rate"].abs() > p["cost"]
 
-    # Level 5: true arbitrage against the American range, at tradeable prices.
+    # Level 6: true arbitrage against the American range, at tradeable prices.
     #   too cheap: buy the call at the ask, sell the put at the bid, short the stock
     #   too rich:  sell the call at the bid, buy the put at the ask, buy the stock
     #
@@ -178,7 +232,7 @@ def sanity_check(p: pd.DataFrame, ticker: str) -> dict:
     # Hard checks
     assert len(p) > 0, f"{ticker}: no strikes with both a call and a put"
     assert (p["cost"] >= 0).all(), f"{ticker}: negative spread cost, a bid sits above an ask"
-    cols = ["raw_gap", "residual_gap", "residual_ex_early", "arb_profit"]
+    cols = ["raw_gap", "residual_gap", "residual_ex_early", "residual_ex_rate", "arb_profit"]
     assert np.isfinite(p[cols].values).all(), f"{ticker}: missing values"
     assert (p["eep_c"] >= -1e-9).all() and (p["eep_p"] >= -1e-9).all(), \
         f"{ticker}: negative early exercise value"
@@ -228,6 +282,16 @@ def sanity_check(p: pd.DataFrame, ticker: str) -> dict:
     below = p[p["side"] == "below forward"]
     above = p[p["side"] == "above forward"]
 
+    # Implied funding rates should sit a little above the T-bill. Far above or
+    # below would mean the fitted lines are picking up something else.
+    rates = p.drop_duplicates("expiry").dropna(subset=["rate_implied"])
+    spread_bp = ((rates["rate_implied"] - rates["r"]) * 1e4).median() if len(rates) else np.nan
+    if len(rates):
+        log.info("%s: implied funding rate on %d expiries, median %.0f bp over the T-bill",
+                 ticker, len(rates), spread_bp)
+        if abs(spread_bp) > 200:
+            log.warning("%s: implied funding is %.0f bp from the T-bill, more than expected", ticker, spread_bp)
+
     log.info("%s: sanity checks passed", ticker)
     return {
         "pairs": len(p),
@@ -238,6 +302,8 @@ def sanity_check(p: pd.DataFrame, ticker: str) -> dict:
         "above_fwd_eep_put": round(above["eep_p"].median(), 3) if len(above) else np.nan,
         "beats_cost_pct": round(p["beats_cost"].mean() * 100, 1),
         "ex_early_beats_pct": round(p["beats_cost_ex_early"].mean() * 100, 1),
+        "ex_rate_beats_pct": round(p["beats_cost_ex_rate"].mean() * 100, 1),
+        "funding_vs_tbill_bp": round(spread_bp, 0),
         "true_arb": len(arbs),
         "spot_shift_pct": round(spot_shift, 3),
         "near_atm_resid_vs_cost": round(resid_ratio, 2),
@@ -290,8 +356,9 @@ def main() -> None:
 
     flagged = all_pairs[all_pairs["beats_cost"]].sort_values("gap_over_cost", ascending=False)
     cols = ["ticker", "expiry", "strike", "side", "moneyness", "days_to_expiry", "mid_c", "mid_p",
-            "raw_gap", "residual_gap", "eep_c", "eep_p", "residual_ex_early", "cost", "gap_over_cost",
-            "beats_cost_mkt_fwd", "beats_cost_ex_early", "arb_profit", "true_arb"]
+            "raw_gap", "residual_gap", "eep_c", "eep_p", "residual_ex_early", "rate_implied", "residual_ex_rate",
+            "cost", "gap_over_cost", "beats_cost_mkt_fwd", "beats_cost_ex_early", "beats_cost_ex_rate",
+            "arb_profit", "true_arb"]
     numeric = flagged[cols].select_dtypes("number").columns
     flagged = flagged[cols].copy()
     flagged[numeric] = flagged[numeric].round(4)
@@ -303,6 +370,8 @@ def main() -> None:
     beat = int(a["beats_cost"].sum())
     beat_mkt = int((a["beats_cost"] & a["beats_cost_mkt_fwd"]).sum())
     beat_ex = int((a["beats_cost"] & a["beats_cost_mkt_fwd"] & a["beats_cost_ex_early"]).sum())
+    beat_rate = int((a["beats_cost"] & a["beats_cost_mkt_fwd"] & a["beats_cost_ex_early"]
+                     & a["beats_cost_ex_rate"]).sum())
     arb = int(a["true_arb"].sum())
     pd.set_option("display.width", 220)
     print("\n=== Put-call parity ===")
@@ -311,12 +380,15 @@ def main() -> None:
           f"\n  -> {beat} beat the spread ({beat / total:.1%})"
           f"\n  -> {beat_mkt} still do with the market forward ({beat_mkt / total:.1%})"
           f"\n  -> {beat_ex} still do once early exercise is removed ({beat_ex / total:.1%})"
+          f"\n  -> {beat_rate} still do with the market's own funding rate ({beat_rate / total:.1%})"
           f"\n  -> {arb} break the American range at tradeable prices")
     print("\nraw_gap             median |C - P - parity|, our own spot and trailing dividend")
     print("mkt_fwd_gap         same against the market forward from Step 6")
     print("ex_early_gap        same again after removing each leg's early exercise value")
     print("above_fwd_eep_put   median put early exercise value for strikes above the forward, in dollars")
     print("ex_early_beats_pct  share of pairs whose early exercise free gap still beats the spread")
+    print("ex_rate_beats_pct   same after the implied funding rate on expiries over 90 days")
+    print("funding_vs_tbill_bp median implied funding rate minus the 3 month T-bill, in basis points")
     print("spot_shift_pct      our spot vs the spot implied by short expiries")
     print(f"\nFlagged pairs saved to {REPORT_DIR}/parity_flagged.csv")
 
