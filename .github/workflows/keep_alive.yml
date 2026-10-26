@@ -1,0 +1,45 @@
+# Keeps the live Streamlit app awake. Free apps sleep after 12 hours without a
+# visitor, and commits do not count, so a real browser visits every 6 hours.
+# Even if GitHub starts a run late, the app never goes 12 hours unvisited.
+#
+# Doubles as a health check: if the app does not load, the run turns red and
+# GitHub emails you, with a screenshot of what the browser saw attached.
+
+name: Keep app awake
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"   # every 6 hours, at a quiet minute
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  visit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install a headless browser
+        run: |
+          pip install playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Visit the app
+        run: python scripts/keep_alive.py
+
+      - name: Save a screenshot if the app did not load
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: keep-alive-failure
+          path: keep_alive_failure.png
