@@ -5,7 +5,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from src import ui
-from src.app_data import TICKERS, atm_vol_30d, expiry_label, load_chain, load_surface, load_svi, skew_30d, smile_vol
+from src.app_data import TICKERS, atm_vol_30d, expiry_label, load_chain, load_surface, load_svi, skew_label, smile_vol
 
 # One hue, dark to light, so higher vol reads as brighter on the dark background
 VOL_SCALE = [[0.0, "#0d366b"], [0.25, "#1c5cab"], [0.5, "#3987e5"], [0.75, "#86b6ef"], [1.0, "#e3eefc"]]
@@ -22,7 +22,7 @@ chain = load_chain(ticker)
 
 ui.kpis([
     {"label": "30 day ATM vol", "value": f"{atm_vol_30d(ticker) * 100:.1f}%", "note": "SVI at the forward"},
-    {"label": "30 day skew", "value": f"{skew_30d(ticker):.1f} pts", "note": "95% strike minus 105% strike",
+    {"label": "30 day skew", "value": skew_label(ticker), "note": "95% strike minus 105% strike",
      "color": ui.PUT},
     {"label": "Expiries fitted", "value": f"{len(svi)}", "note": "clean SVI fits", "color": ui.CALL},
     {"label": "Median fit error", "value": f"{svi['rmse_vol_pts'].median():.2f} pts", "note": "SVI vs market vols",

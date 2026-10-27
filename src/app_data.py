@@ -20,6 +20,7 @@ REPORTS = ROOT / "reports"
 FIGURES = REPORTS / "figures"
 
 TICKERS = ["SPY", "AAPL", "NVDA", "TSLA", "JPM"]
+SKEW_MAX_DAYS_AWAY = 30  # how far from 30 days we look for an expiry with both skew strikes quoted
 
 # The daily job commits fresh results every evening. Cached data expires after
 # an hour, so the live app picks up a new snapshot without a manual restart.
@@ -71,16 +72,40 @@ def smile_vol(params: pd.Series, strikes, forward: float) -> np.ndarray:
     return np.sqrt(np.maximum(w, 1e-12) / params["T"])
 
 
-def skew_30d(ticker: str) -> float:
-    """30 day vol at a 95% strike minus at a 105% strike, in vol points (same as Step 8)."""
+def skew_near_30d(ticker: str) -> tuple[float, float]:
+    """
+    Vol at a 95% strike minus a 105% strike, in vol points, and the days to
+    expiry it was measured at.
+
+    Uses the expiry closest to 30 days that has real quotes at both strikes.
+    The closest one is not always usable: on October 26 JPM's 25 day expiry
+    had no quotes up at 105%, so we move to the next expiry rather than
+    extrapolate. Callers show the tenor when it is not near 30 days.
+    """
     g = load_surface(ticker)
-    expiry = g.loc[(g["days"] - 30).abs().idxmin(), "expiry"]
-    one = g[g["expiry"] == expiry]
-    low = one[np.isclose(one["moneyness"], 0.95)]
-    high = one[np.isclose(one["moneyness"], 1.05)]
-    if low.empty or high.empty or low["extrapolated"].iloc[0] or high["extrapolated"].iloc[0]:
-        return np.nan
-    return (low["iv"].iloc[0] - high["iv"].iloc[0]) * 100
+    expiries = g.drop_duplicates("expiry").assign(dist=lambda x: (x["days"] - 30).abs()).sort_values("dist")
+    for e in expiries.itertuples():
+        if e.dist > SKEW_MAX_DAYS_AWAY:
+            break
+        one = g[g["expiry"] == e.expiry]
+        low = one[np.isclose(one["moneyness"], 0.95)]
+        high = one[np.isclose(one["moneyness"], 1.05)]
+        if low.empty or high.empty or low["extrapolated"].iloc[0] or high["extrapolated"].iloc[0]:
+            continue
+        return float((low["iv"].iloc[0] - high["iv"].iloc[0]) * 100), float(e.days)
+    return np.nan, np.nan
+
+
+def skew_30d(ticker: str) -> float:
+    return skew_near_30d(ticker)[0]
+
+
+def skew_label(ticker: str) -> str:
+    """Skew for display: '9.4 pts', '3.4 pts (53d)' when not near 30 days, or 'n/a'."""
+    value, days = skew_near_30d(ticker)
+    if not np.isfinite(value):
+        return "n/a"
+    return f"{value:.1f} pts" + ("" if abs(days - 30) <= 7 else f" ({days:.0f}d)")
 
 
 def atm_vol_30d(ticker: str) -> float:
