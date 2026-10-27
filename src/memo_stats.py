@@ -45,6 +45,7 @@ TICKERS = ["SPY", "AAPL", "NVDA", "TSLA", "JPM"]
 PROCESSED_DIR = Path("data/processed")
 REPORT_DIR = Path("reports")
 TENORS = [7, 30, 90, 180, 365]
+MAX_FLAT_DAYS = 7  # how far past the nearest fitted expiry we let a vol stand in
 
 log = logging.getLogger("memo_stats")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -62,8 +63,14 @@ def load_svi(ticker: str) -> pd.DataFrame:
 def atm_at(svi: pd.DataFrame, days: float) -> float:
     """ATM vol at any tenor, interpolating total variance linearly in time."""
     t = days / 365
-    if t < svi["T"].iloc[0] or t > svi["T"].iloc[-1]:
-        return np.nan  # never extrapolate past the listed expiries
+    # Short expiries often have too few quotes for a clean SVI fit, so the
+    # first fitted expiry can sit a few days past 30. Within 7 days we take
+    # its vol as is. Further out we report nothing rather than guess.
+    gap = MAX_FLAT_DAYS / 365
+    if t < svi["T"].iloc[0]:
+        return float(svi["atm_vol"].iloc[0]) if svi["T"].iloc[0] - t <= gap else np.nan
+    if t > svi["T"].iloc[-1]:
+        return float(svi["atm_vol"].iloc[-1]) if t - svi["T"].iloc[-1] <= gap else np.nan
     return float(np.sqrt(np.interp(t, svi["T"], svi["w_atm"]) / t))
 
 
@@ -202,7 +209,11 @@ def ticker_stats(ticker: str, overrides: dict, pull_day: pd.Timestamp, mvm, pari
 
 def sanity_check(stats: dict) -> None:
     for t, s in stats["tickers"].items():
-        assert s["atm_30d_pct"] and 3 < s["atm_30d_pct"] < 200, f"{t}: 30 day ATM vol looks wrong"
+        # A missing tenor only means no clean fit near it today, so warn. A
+        # value outside a sane range means something is broken, so stop.
+        if s["atm_30d_pct"] is None:
+            log.warning("%s: no clean SVI fit within %d days of 30 days, 30 day ATM vol left blank",
+                        t, MAX_FLAT_DAYS)
         for d in TENORS:
             v = s.get(f"atm_{d}d_pct")
             assert v is None or 3 < v < 300, f"{t}: {d} day ATM vol {v} looks wrong"

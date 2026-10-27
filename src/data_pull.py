@@ -4,7 +4,7 @@ Step 1: pull option chains from Yahoo Finance and save each pull as a Parquet sn
 Run from the project root:
     python -m src.data_pull
     python -m src.data_pull --tickers SPY AAPL
-    python -m src.data_pull --strict --skip-if-closed   (what the daily GitHub job runs)
+    python -m src.data_pull --strict --skip-if-closed --skip-if-done   (what the daily GitHub job runs)
 
 Every snapshot goes to data/raw/<TICKER>_<UTC timestamp>.parquet so we can
 rebuild any past surface later. Nothing gets saved if a hard sanity check fails.
@@ -177,6 +177,24 @@ def market_traded_today() -> bool:
     return last_bar == today
 
 
+def already_pulled_today() -> bool:
+    """
+    True if data/raw already holds a SPY snapshot taken today, New York time.
+    The daily job is scheduled three times each evening in case GitHub skips
+    one, and this stops the second and third runs from saving duplicates.
+    File names carry the UTC pull time, for example SPY_20261027_013000.parquet.
+    """
+    today = datetime.now(ZoneInfo("America/New_York")).date()
+    for f in RAW_DIR.glob("SPY_*.parquet"):
+        try:
+            stamp = datetime.strptime(f.stem[4:], "%Y%m%d_%H%M%S").replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue  # not one of our snapshot files
+        if stamp.astimezone(ZoneInfo("America/New_York")).date() == today:
+            return True
+    return False
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--tickers", nargs="+", default=TICKERS)
@@ -184,9 +202,14 @@ def main() -> None:
                         help="exit with an error if any ticker fails, so the scheduled job shows red")
     parser.add_argument("--skip-if-closed", action="store_true",
                         help="do nothing if the market did not trade today")
+    parser.add_argument("--skip-if-done", action="store_true",
+                        help="do nothing if today's snapshot is already saved")
     args = parser.parse_args()
 
     setup_logging()
+    if args.skip_if_done and already_pulled_today():
+        log.info("Today's snapshot is already saved by an earlier run. Nothing to pull.")
+        return
     if args.skip_if_closed and not market_traded_today():
         log.info("The market did not trade today (weekend or holiday). Nothing to pull.")
         return

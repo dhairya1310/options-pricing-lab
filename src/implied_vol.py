@@ -236,6 +236,11 @@ def sanity_check(df: pd.DataFrame, ticker: str) -> dict:
     #       should sit near zero. This is the fair test.
     raw_gaps, euro_gaps = [], []
     for _, one in solved.groupby("expiry"):
+        # This check needs a call and a put on the same strike. Some expiries
+        # have only one side solved (a thin far dated expiry, say), and then
+        # there is nothing to compare, so we skip them rather than crash.
+        if one["option_type"].nunique() < 2:
+            continue
         both = one.pivot_table(index="strike", columns="option_type", values=["iv", "mid"]).dropna()
         if both.empty:
             continue

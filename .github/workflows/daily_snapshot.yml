@@ -2,10 +2,15 @@
 # pipeline, and commit the results. The live Streamlit app reads those files,
 # so it shows the latest close by the next morning with nobody touching it.
 #
-# Timing: GitHub schedules run on UTC. 21:30 UTC is 5:30 PM New York time in
-# summer and 4:30 PM in winter, so it always lands after the 4 PM close
-# (and after SPY options stop at 4:15 PM). GitHub can start scheduled jobs
-# up to an hour late on busy days, which is fine here.
+# Timing: GitHub schedules run on UTC and GitHub can delay a scheduled run,
+# or skip it entirely when it is busy (it skipped the very first one here).
+# So there are three tries every evening, New York time:
+#   21:30 UTC   5:30 PM summer, 4:30 PM winter
+#   22:47 UTC   6:47 PM summer, 5:47 PM winter
+#   01:13 UTC   9:13 PM summer, 8:13 PM winter (next day in UTC, hence Tue to Sat)
+# All land after the 4 PM close and after SPY options stop at 4:15 PM. The
+# first try that gets through saves the snapshot, and the later ones see it
+# (--skip-if-done) and stop without pulling anything.
 #
 # Needs one repository secret: FRED_API_KEY (Settings > Secrets and variables > Actions).
 
@@ -14,6 +19,8 @@ name: Daily option chain snapshot
 on:
   schedule:
     - cron: "30 21 * * 1-5"   # Monday to Friday
+    - cron: "47 22 * * 1-5"   # backup
+    - cron: "13 1 * * 2-6"    # second backup, Tuesday to Saturday in UTC
   workflow_dispatch:           # adds a "Run workflow" button for manual runs
 
 # The job pushes the new results back to the repo, so it needs write access
@@ -50,8 +57,9 @@ jobs:
       # --skip-if-closed: weekends are already excluded above, this catches
       #   exchange holidays so we never save a copy of the previous session
       # --strict: any ticker failing turns the run red and GitHub emails you
+      # --skip-if-done: a backup run stops here if an earlier run already got today
       - name: Pull the option chains
-        run: python -m src.data_pull --strict --skip-if-closed
+        run: python -m src.data_pull --strict --skip-if-closed --skip-if-done
 
       # Only run the pipeline when a new snapshot actually arrived
       - name: Check for a new snapshot
