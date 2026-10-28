@@ -212,11 +212,21 @@ def measure(p: pd.DataFrame) -> pd.DataFrame:
     #   upper bound uses the lowest q, S e^(-q_low T) - K e^(-rT), which for a
     #   negative q is the same as allowing a higher funding rate
     # Anything still flagged is a genuine quote problem, not an assumption.
-    S_obs = p["spot_implied"]
+    #
+    # The same goes for the stock price. Our 4 PM close and the spot implied
+    # by the options can differ by tens of cents (SPY options trade until
+    # 4:15 PM, and delayed quotes are not all taken at the same instant). On
+    # October 27 that gap was 55 cents and made 22 SPY pairs expiring in one
+    # or two days look like free money at the implied spot, while all of them
+    # lost money at the actual close. So each side of the range uses whichever
+    # of the two prices is less favourable to an arbitrage: the lower one for
+    # the trade that shorts the stock, the higher one for the trade that buys it.
+    S_low = np.minimum(p["spot"], p["spot_implied"])
+    S_high = np.maximum(p["spot"], p["spot_implied"])
     q_all = np.vstack([p["q_trailing"].values, p["q"].values, np.zeros(len(p))])
     p["q_high"], p["q_low"] = q_all.max(axis=0), q_all.min(axis=0)
-    lower = S_obs * np.exp(-p["q_high"] * T) - K
-    upper = S_obs * np.exp(-p["q_low"] * T) - K * disc_r
+    lower = S_low * np.exp(-p["q_high"] * T) - K
+    upper = S_high * np.exp(-p["q_low"] * T) - K * disc_r
     p["arb_profit_low"] = lower - (p["ask_c"] - p["bid_p"])
     p["arb_profit_high"] = (p["bid_c"] - p["ask_p"]) - upper
     p["arb_profit"] = p[["arb_profit_low", "arb_profit_high"]].max(axis=1)
