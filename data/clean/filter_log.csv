@@ -1,46 +1,46 @@
 ticker,filter,removed,remaining
-SPY,start,0,9157
-SPY,expired on pull date,0,9157
-SPY,no trade in last 7 days,2530,6627
-SPY,zero bid,341,6286
-SPY,ask below bid,0,6286
-SPY,open interest under 100,1723,4563
-SPY,spread over 20% of mid,860,3703
-SPY,ask below intrinsic,0,3703
-SPY,above no-arbitrage max,0,3703
-AAPL,start,0,2841
-AAPL,expired on pull date,0,2841
-AAPL,no trade in last 7 days,624,2217
-AAPL,zero bid,238,1979
-AAPL,ask below bid,1,1978
-AAPL,open interest under 100,498,1480
-AAPL,spread over 20% of mid,440,1040
-AAPL,ask below intrinsic,0,1040
-AAPL,above no-arbitrage max,0,1040
-NVDA,start,0,3649
-NVDA,expired on pull date,0,3649
-NVDA,no trade in last 7 days,894,2755
-NVDA,zero bid,150,2605
-NVDA,ask below bid,19,2586
-NVDA,open interest under 100,508,2078
-NVDA,spread over 20% of mid,456,1622
-NVDA,ask below intrinsic,0,1622
-NVDA,above no-arbitrage max,1,1621
-TSLA,start,0,4169
-TSLA,expired on pull date,0,4169
-TSLA,no trade in last 7 days,880,3289
-TSLA,zero bid,106,3183
-TSLA,ask below bid,3,3180
-TSLA,open interest under 100,784,2396
-TSLA,spread over 20% of mid,515,1881
-TSLA,ask below intrinsic,0,1881
-TSLA,above no-arbitrage max,0,1881
+SPY,start,0,8939
+SPY,expired on pull date,0,8939
+SPY,no trade in last 7 days,2495,6444
+SPY,zero bid,228,6216
+SPY,ask below bid,0,6216
+SPY,open interest under 100,1666,4550
+SPY,spread over 20% of mid,342,4208
+SPY,ask below intrinsic,6,4202
+SPY,above no-arbitrage max,0,4202
+AAPL,start,0,2747
+AAPL,expired on pull date,0,2747
+AAPL,no trade in last 7 days,579,2168
+AAPL,zero bid,209,1959
+AAPL,ask below bid,0,1959
+AAPL,open interest under 100,485,1474
+AAPL,spread over 20% of mid,474,1000
+AAPL,ask below intrinsic,0,1000
+AAPL,above no-arbitrage max,0,1000
+NVDA,start,0,3553
+NVDA,expired on pull date,0,3553
+NVDA,no trade in last 7 days,874,2679
+NVDA,zero bid,119,2560
+NVDA,ask below bid,8,2552
+NVDA,open interest under 100,462,2090
+NVDA,spread over 20% of mid,463,1627
+NVDA,ask below intrinsic,0,1627
+NVDA,above no-arbitrage max,1,1626
+TSLA,start,0,4032
+TSLA,expired on pull date,0,4032
+TSLA,no trade in last 7 days,871,3161
+TSLA,zero bid,121,3040
+TSLA,ask below bid,1,3039
+TSLA,open interest under 100,681,2358
+TSLA,spread over 20% of mid,503,1855
+TSLA,ask below intrinsic,0,1855
+TSLA,above no-arbitrage max,0,1855
 JPM,start,0,1291
 JPM,expired on pull date,0,1291
-JPM,no trade in last 7 days,505,786
-JPM,zero bid,89,697
-JPM,ask below bid,0,697
-JPM,open interest under 100,207,490
-JPM,spread over 20% of mid,117,373
-JPM,ask below intrinsic,0,373
-JPM,above no-arbitrage max,0,373
+JPM,no trade in last 7 days,478,813
+JPM,zero bid,110,703
+JPM,ask below bid,0,703
+JPM,open interest under 100,207,496
+JPM,spread over 20% of mid,118,378
+JPM,ask below intrinsic,0,378
+JPM,above no-arbitrage max,0,378
